@@ -31,8 +31,8 @@ That's it. A fixed panel appears at the bottom of the page showing all console o
 
 ```ts
 createConsoleViewer({
-  show: "auto",   // "auto" | "iframe" | "always"  (default: "auto")
-  height: 200,    // panel height in px             (default: 200)
+  show: "always",  // "auto" | "iframe" | "always"  (default: "always")
+  height: 200,     // panel height in px             (default: 200)
 })
 ```
 
@@ -40,9 +40,9 @@ createConsoleViewer({
 
 | Value | Behavior |
 |-------|----------|
-| `"auto"` (default) | Shows only when inside an iframe |
+| `"always"` (default) | Always shows, even outside an iframe |
+| `"auto"` | Shows only when inside an iframe |
 | `"iframe"` | Same as `"auto"` (reserved for future extension) |
-| `"always"` | Always shows, even outside an iframe |
 
 ### `height`
 

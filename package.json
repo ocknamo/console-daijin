@@ -1,6 +1,6 @@
 {
   "name": "console-daijin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A browser console viewer that captures console.log/info/warn/error and displays them in a fixed panel. Zero dependencies.",
   "author": "ocknamo",
   "license": "MIT",

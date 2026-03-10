@@ -4,7 +4,7 @@ export interface ConsoleViewerOptions {
 }
 
 export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
-  const { show = "auto", height = 200 } = options;
+  const { show = "always", height = 200 } = options;
 
   // Visibility gate
   const isInsideIframe = window.self !== window.top;
@@ -32,6 +32,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
     "padding:4px 8px",
   ].join(";");
   document.body.appendChild(panel);
+  document.body.style.paddingBottom = `${height}px`;
 
   type Level = "log" | "info" | "warn" | "error";
 

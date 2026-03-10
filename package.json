@@ -25,7 +25,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "tsup": "^8.0.0",
@@ -38,5 +39,8 @@
     "browser",
     "iframe",
     "logger"
-  ]
+  ],
+  "volta": {
+    "node": "24.14.0"
+  }
 }

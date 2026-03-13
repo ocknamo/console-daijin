@@ -219,28 +219,11 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
       const text = lines.join("\n");
       let success = false;
 
-      if (navigator.clipboard) {
-        try {
-          await navigator.clipboard.writeText(text);
-          success = true;
-        } catch (_e) {
-          // Clipboard API失敗時はexecCommandフォールバックへ
-        }
-      }
-
-      if (!success) {
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
-          document.body.appendChild(ta);
-          ta.select();
-          const ok = document.execCommand("copy");
-          document.body.removeChild(ta);
-          if (ok) success = true;
-        } catch (_e) {
-          // execCommandも失敗
-        }
+      try {
+        await navigator.clipboard.writeText(text);
+        success = true;
+      } catch (_e) {
+        // 失敗時はダイアログへ
       }
 
       if (success) {

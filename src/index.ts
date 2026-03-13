@@ -143,17 +143,32 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
   const copyBtn = makeIconButton(
     '<path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>',
     "Copy",
-    () => {
+    async () => {
       const lines: string[] = [];
       logArea.querySelectorAll<HTMLElement>("[data-level]").forEach((el) => {
         if (el.style.display !== "none" && el.textContent) {
           lines.push(el.textContent);
         }
       });
-      navigator.clipboard?.writeText(lines.join("\n"));
-      copyToast.style.opacity = "1";
-      clearTimeout(copyToastTimer);
-      copyToastTimer = setTimeout(() => { copyToast.style.opacity = "0"; }, 1500);
+      const text = lines.join("\n");
+      try {
+        if (navigator.clipboard) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+        copyToast.style.opacity = "1";
+        clearTimeout(copyToastTimer);
+        copyToastTimer = setTimeout(() => { copyToast.style.opacity = "0"; }, 1500);
+      } catch (_e) {
+        // コピー失敗時はトーストを表示しない
+      }
     }
   );
   header.appendChild(copyBtn);

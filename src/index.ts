@@ -14,7 +14,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
 
   type Level = "log" | "info" | "warn" | "error";
 
-  const HEADER_H = 20;
+  const HEADER_H = 26;
   const activeFilters = new Set<Level>(["log", "info", "warn", "error"]);
 
   // Outer wrapper
@@ -56,12 +56,12 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
       "border:none",
       "color:#aaa",
       "cursor:pointer",
-      "padding:0 2px",
+      "padding:0 6px",
       "display:flex",
       "align-items:center",
       "line-height:1",
     ].join(";");
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">${svgPath}</svg>`;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">${svgPath}</svg>`;
     btn.addEventListener("mouseenter", () => { btn.style.color = "#fff"; });
     btn.addEventListener("mouseleave", () => { btn.style.color = "#aaa"; });
     btn.addEventListener("click", onClick);
@@ -93,6 +93,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
       "gap:2px",
       "cursor:pointer",
       "user-select:none",
+      "padding:0 4px",
     ].join(";");
 
     const cb = document.createElement("input");
@@ -120,9 +121,22 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
     header.appendChild(label);
   });
 
-  // Spacer to push copy button to the right
+  // Spacer to push copy button to the right (also holds copy toast)
   const spacer = document.createElement("div");
-  spacer.style.cssText = "flex:1";
+  spacer.style.cssText = "flex:1;display:flex;align-items:center;justify-content:flex-end;padding-right:4px";
+
+  const copyToast = document.createElement("span");
+  copyToast.textContent = "コピーしました";
+  copyToast.style.cssText = [
+    "color:#aaa",
+    "font-size:10px",
+    "opacity:0",
+    "transition:opacity 0.3s",
+    "pointer-events:none",
+  ].join(";");
+  spacer.appendChild(copyToast);
+  let copyToastTimer: ReturnType<typeof setTimeout>;
+
   header.appendChild(spacer);
 
   // Copy button (Material: content_copy)
@@ -137,6 +151,9 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
         }
       });
       navigator.clipboard?.writeText(lines.join("\n"));
+      copyToast.style.opacity = "1";
+      clearTimeout(copyToastTimer);
+      copyToastTimer = setTimeout(() => { copyToast.style.opacity = "0"; }, 1500);
     }
   );
   header.appendChild(copyBtn);

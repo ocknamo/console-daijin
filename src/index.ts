@@ -56,7 +56,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
       "border:none",
       "color:#aaa",
       "cursor:pointer",
-      "padding:0 6px",
+      "padding:0 12px",
       "display:flex",
       "align-items:center",
       "line-height:1",

@@ -139,6 +139,72 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
 
   header.appendChild(spacer);
 
+  function showCopyFallbackDialog(text: string): void {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "background:rgba(0,0,0,0.6)",
+      "z-index:2147483647",
+      "display:flex",
+      "align-items:center",
+      "justify-content:center",
+    ].join(";");
+
+    const dialog = document.createElement("div");
+    dialog.style.cssText = [
+      "background:#2d2d2d",
+      "color:#d4d4d4",
+      "border:1px solid #555",
+      "border-radius:6px",
+      "padding:16px",
+      "width:80vw",
+      "max-width:640px",
+      "font-family:monospace",
+      "font-size:12px",
+      "display:flex",
+      "flex-direction:column",
+      "gap:8px",
+    ].join(";");
+
+    const titleRow = document.createElement("div");
+    titleRow.style.cssText = "display:flex;justify-content:space-between;align-items:center";
+    const title = document.createElement("span");
+    title.textContent = "テキストを選択してコピーしてください";
+    title.style.fontSize = "11px";
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕";
+    closeBtn.style.cssText = "background:transparent;border:none;color:#aaa;cursor:pointer;font-size:14px;padding:0";
+    closeBtn.addEventListener("click", () => overlay.remove());
+    titleRow.appendChild(title);
+    titleRow.appendChild(closeBtn);
+
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.readOnly = true;
+    ta.style.cssText = [
+      "width:100%",
+      "height:200px",
+      "background:#1e1e1e",
+      "color:#d4d4d4",
+      "border:1px solid #555",
+      "border-radius:4px",
+      "padding:8px",
+      "resize:vertical",
+      "font-family:monospace",
+      "font-size:12px",
+      "box-sizing:border-box",
+    ].join(";");
+
+    dialog.appendChild(titleRow);
+    dialog.appendChild(ta);
+    overlay.appendChild(dialog);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    ta.focus();
+    ta.select();
+  }
+
   // Copy button (Material: content_copy)
   const copyBtn = makeIconButton(
     '<path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>',
@@ -151,23 +217,38 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
         }
       });
       const text = lines.join("\n");
-      try {
-        if (navigator.clipboard) {
+      let success = false;
+
+      if (navigator.clipboard) {
+        try {
           await navigator.clipboard.writeText(text);
-        } else {
+          success = true;
+        } catch (_e) {
+          // Clipboard API失敗時はexecCommandフォールバックへ
+        }
+      }
+
+      if (!success) {
+        try {
           const ta = document.createElement("textarea");
           ta.value = text;
           ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
           document.body.appendChild(ta);
           ta.select();
-          document.execCommand("copy");
+          const ok = document.execCommand("copy");
           document.body.removeChild(ta);
+          if (ok) success = true;
+        } catch (_e) {
+          // execCommandも失敗
         }
+      }
+
+      if (success) {
         copyToast.style.opacity = "1";
         clearTimeout(copyToastTimer);
         copyToastTimer = setTimeout(() => { copyToast.style.opacity = "0"; }, 1500);
-      } catch (_e) {
-        // コピー失敗時はトーストを表示しない
+      } else {
+        showCopyFallbackDialog(text);
       }
     }
   );

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>console-daijin demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        padding: 24px;
+        background: #f6f6f6;
+        color: #222;
+      }
+      h1 {
+        font-size: 18px;
+      }
+      p {
+        max-width: 60ch;
+        line-height: 1.6;
+        font-size: 14px;
+      }
+      code {
+        background: #e6e6e6;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 16px 0;
+      }
+      button {
+        font: inherit;
+        font-size: 13px;
+        padding: 6px 12px;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: #888;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>console-daijin demo</h1>
+    <p>
+      Serve the repository root (for example <code>npx serve .</code>) and open
+      <code>/examples/</code>. Run <code>node dist/cli.js</code> in another terminal to
+      collect the logs; without it the panel still works and forwarding stops itself
+      after a few failed attempts.
+    </p>
+
+    <div class="row">
+      <button data-act="log">console.log</button>
+      <button data-act="info">console.info</button>
+      <button data-act="warn">console.warn</button>
+      <button data-act="error">console.error</button>
+    </div>
+
+    <div class="row">
+      <button data-act="error-object">Error object</button>
+      <button data-act="circular">Circular object</button>
+      <button data-act="dom">DOM node</button>
+      <button data-act="burst">Burst of 200 logs</button>
+    </div>
+
+    <div class="row">
+      <button data-act="throw">Uncaught throw</button>
+      <button data-act="reject">Unhandled rejection</button>
+      <button data-act="resource">Failed resource load</button>
+      <button data-act="reload">Log then reload</button>
+    </div>
+
+    <script type="module">
+      import { createConsoleViewer } from "../dist/index.js";
+
+      createConsoleViewer({ forward: true });
+
+      const actions = {
+        log: () => console.log("plain log", { user: "ada", roles: ["admin"] }),
+        info: () => console.info("informational message"),
+        warn: () => console.warn("something looks off"),
+        error: () => console.error("something broke"),
+
+        "error-object": () => {
+          const err = new Error("database unreachable");
+          err.code = "ECONNREFUSED";
+          console.error("query failed:", err);
+        },
+        circular: () => {
+          const node = { name: "root" };
+          node.self = node;
+          console.log("circular:", node);
+        },
+        dom: () => console.log("element:", document.querySelector("h1")),
+        burst: () => {
+          for (let i = 0; i < 200; i++) console.log("burst entry", i);
+        },
+
+        throw: () => {
+          setTimeout(() => {
+            throw new Error("uncaught from a timer");
+          }, 0);
+        },
+        reject: () => {
+          Promise.reject(new Error("nobody caught me"));
+        },
+        resource: () => {
+          const img = document.createElement("img");
+          img.src = `/does-not-exist-${Date.now()}.png`;
+          document.body.appendChild(img);
+        },
+        reload: () => {
+          console.warn("logged immediately before reload");
+          location.reload();
+        },
+      };
+
+      for (const button of document.querySelectorAll("button[data-act]")) {
+        button.addEventListener("click", () => actions[button.dataset.act]());
+      }
+    </script>
+  </body>
+</html>

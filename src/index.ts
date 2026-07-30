@@ -1,10 +1,45 @@
+import {
+  ensureConsoleHooks,
+  ensureUncaughtHooks,
+  subscribe,
+  type CapturedEntry,
+} from "./capture";
+import { LOG_LEVELS, type LogLevel } from "./protocol";
+import { startForwarding, type ForwardOptions } from "./transport";
+
+export type { CapturedEntry, ForwardOptions, LogLevel };
+export { serializeArg, serializeArgs, type SerializeOptions } from "./serialize";
+
 export interface ConsoleViewerOptions {
   show?: "auto" | "always" | "iframe";
   height?: number;
+  /**
+   * Forward captured logs to a local collector (`npx console-daijin-server`).
+   * Off by default. `true` uses the default endpoint on localhost.
+   */
+  forward?: boolean | ForwardOptions;
+}
+
+const LEVEL_COLORS: Record<LogLevel, string> = {
+  log: "#d4d4d4",
+  info: "#9cdcfe",
+  warn: "#dcdcaa",
+  error: "#f44747",
+  uncaught: "#c586c0",
+};
+
+/**
+ * Starts forwarding console output to a local collector without rendering the
+ * on-page panel. Returns a function that flushes and stops.
+ */
+export function forwardConsoleLogs(options: ForwardOptions = {}): () => void {
+  ensureConsoleHooks();
+  ensureUncaughtHooks();
+  return startForwarding(options);
 }
 
 export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
-  const { show = "always", height = 200 } = options;
+  const { show = "always", height = 200, forward = false } = options;
 
   // Visibility gate
   const isInsideIframe = window.self !== window.top;
@@ -12,10 +47,8 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
     if (!isInsideIframe) return;
   }
 
-  type Level = "log" | "info" | "warn" | "error";
-
   const HEADER_H = 26;
-  const activeFilters = new Set<Level>(["log", "info", "warn", "error"]);
+  const activeFilters = new Set<LogLevel>(LOG_LEVELS);
 
   // Outer wrapper
   const wrapper = document.createElement("div");
@@ -77,14 +110,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
   header.appendChild(clearBtn);
 
   // Filter checkboxes
-  const LEVEL_COLORS: Record<Level, string> = {
-    log:   "#d4d4d4",
-    info:  "#9cdcfe",
-    warn:  "#dcdcaa",
-    error: "#f44747",
-  };
-
-  (["log", "info", "warn", "error"] as Level[]).forEach((level) => {
+  LOG_LEVELS.forEach((level) => {
     const label = document.createElement("label");
     label.style.cssText = [
       `color:${LEVEL_COLORS[level]}`,
@@ -251,27 +277,17 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
   ].join(";");
   wrapper.appendChild(logArea);
 
-  function appendEntry(level: Level, args: unknown[]): void {
+  function appendEntry(entry: CapturedEntry): void {
     const line = document.createElement("div");
-    line.dataset.level = level;
-    line.style.color = LEVEL_COLORS[level];
+    line.dataset.level = entry.level;
+    line.style.color = LEVEL_COLORS[entry.level];
+    // Stack traces are multi-line; keep them readable inside the panel.
+    line.style.whiteSpace = "pre-wrap";
+    line.style.wordBreak = "break-word";
 
-    const text = args
-      .map((a) => {
-        if (typeof a === "object" && a !== null) {
-          try {
-            return JSON.stringify(a);
-          } catch {
-            return String(a);
-          }
-        }
-        return String(a);
-      })
-      .join(" ");
+    line.textContent = `[${entry.level}] ${entry.text.join(" ")}`;
 
-    line.textContent = `[${level}] ${text}`;
-
-    if (!activeFilters.has(level)) {
+    if (!activeFilters.has(entry.level)) {
       line.style.display = "none";
     }
 
@@ -283,26 +299,11 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
     }
   }
 
-  // Hook console methods (preserve original behavior)
-  const origLog = console.log;
-  const origInfo = console.info;
-  const origWarn = console.warn;
-  const origError = console.error;
+  ensureConsoleHooks();
+  ensureUncaughtHooks();
+  subscribe(appendEntry);
 
-  console.log = (...args: unknown[]) => {
-    origLog.apply(console, args);
-    appendEntry("log", args);
-  };
-  console.info = (...args: unknown[]) => {
-    origInfo.apply(console, args);
-    appendEntry("info", args);
-  };
-  console.warn = (...args: unknown[]) => {
-    origWarn.apply(console, args);
-    appendEntry("warn", args);
-  };
-  console.error = (...args: unknown[]) => {
-    origError.apply(console, args);
-    appendEntry("error", args);
-  };
+  if (forward !== false) {
+    startForwarding(forward === true ? {} : forward);
+  }
 }

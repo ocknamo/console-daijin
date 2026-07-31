@@ -150,7 +150,7 @@ Batches are sized by bytes, not by entry count, so a page that logs large object
 | Response | Treatment |
 |----------|-----------|
 | `413` too large | That batch is dropped and reported once. Forwarding continues — the next batch is smaller. |
-| `400` malformed | Counted separately. After `maxFailures`, forwarding stops and reports the collector's own reason, since the usual cause is a version mismatch between the library and the CLI, which will not fix itself. |
+| `400` malformed | Counted separately, and reset by any success. After `maxFailures` **consecutive** rejections, forwarding stops and reports the collector's own reason, since an unbroken run of these usually means a version mismatch between the library and the CLI, which will not fix itself. |
 | Network error, `5xx` | Counted as unreachable. After `maxFailures`, forwarding stops and says so once. |
 
 The panel keeps working in all three cases.

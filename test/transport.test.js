@@ -207,6 +207,33 @@ describe("failure accounting", () => {
     assert.doesNotMatch(stopWarnings[0], /Forwarding continues/);
   });
 
+  test("a successful batch clears the malformed-batch counter too", async () => {
+    // Only an unbroken run of 400s means the two sides disagree. A receiver
+    // that is restarting — or a proxy in front of a replaceable endpoint — can
+    // return the odd 400, and accumulating those would halt a healthy session
+    // and then blame it on a version mismatch.
+    const { calls, impl } = recordingFetch((n) =>
+      n % 10 === 0
+        ? { ok: false, status: 400, text: () => Promise.resolve('{"error":"transient"}') }
+        : { ok: true, status: 204 },
+    );
+    setupBrowser({ fetchImpl: impl });
+    stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1, maxFailures: 3 });
+
+    for (let i = 0; i < 30; i++) {
+      console.log("mostly fine", i);
+      await sleep(12);
+    }
+    await sleep(150);
+
+    assert.ok(calls.length >= 25, `forwarding should continue, got ${calls.length} attempts`);
+    assert.equal(
+      warnings.filter((w) => w.includes("stopped forwarding logs")).length,
+      0,
+      "sporadic 400s must not stop a session that is overwhelmingly succeeding",
+    );
+  });
+
   test("400 and 413 are counted separately", async () => {
     // A 413 must not push the protocol counter toward its limit.
     const { calls, impl } = recordingFetch((n) =>

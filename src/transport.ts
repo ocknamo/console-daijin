@@ -185,7 +185,13 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
   const buffer: Buffered[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let failures = 0;
-  /** 400s are counted apart from 413s: see the status handling in `send`. */
+  /**
+   * 400s are counted apart from 413s (see the status handling in `send`), but
+   * like `failures` this counts *consecutive* rejections. A receiver that is
+   * merely restarting can return the odd 400, and the endpoint is explicitly
+   * replaceable — a proxy or a different implementation entirely — so only an
+   * unbroken run of them means the two sides do not understand each other.
+   */
   let protocolFailures = 0;
   let stopped = false;
   let warnedAboutPayload = false;
@@ -243,6 +249,7 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
       (res) => {
         if (res.ok) {
           failures = 0;
+          protocolFailures = 0;
           return;
         }
         // 413 says this particular batch was too big, not that the collector is

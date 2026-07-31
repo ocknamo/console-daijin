@@ -104,6 +104,29 @@ describe("batching", () => {
     }
   });
 
+  test("shrinking holds even for a huge spread, by dropping arguments", async () => {
+    // Truncating each argument is not enough on its own: a per-argument floor
+    // times 20,000 arguments is still over the limit. `console.log(...arr)`
+    // with a big array is an ordinary accident.
+    const { calls, impl } = recordingFetch();
+    setupBrowser({ fetchImpl: impl });
+    stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1000 });
+
+    console.log(...Array.from({ length: 20_000 }, () => "q".repeat(500)));
+    await sleep(400);
+
+    assert.ok(calls.length >= 1, "the entry should still be sent");
+    for (const call of calls) {
+      const bytes = Buffer.byteLength(call.body, "utf8");
+      assert.ok(bytes < MAX_BODY_BYTES, `body of ${bytes} bytes exceeds the 1 MB limit`);
+    }
+    const args = calls.flatMap((c) => JSON.parse(c.body).entries).flatMap((e) => e.args);
+    assert.ok(
+      args.some((a) => /more arguments dropped/.test(a)),
+      "dropping arguments should be visible in the output",
+    );
+  });
+
   test("entries are batched rather than sent one request per line", async () => {
     const { calls, impl } = recordingFetch();
     setupBrowser({ fetchImpl: impl });
@@ -156,6 +179,54 @@ describe("failure accounting", () => {
     );
     const payloadWarnings = warnings.filter((w) => w.includes("rejected a batch"));
     assert.equal(payloadWarnings.length, 1, "the payload problem should be reported once");
+  });
+
+  test("a malformed-batch rejection stops with the collector's own reason", async () => {
+    // A version mismatch between the library and the CLI is permanent, so
+    // "that batch was dropped, forwarding continues" would be a lie repeated
+    // forever while nothing arrived.
+    const { calls, impl } = recordingFetch(() => ({
+      ok: false,
+      status: 400,
+      text: () => Promise.resolve(JSON.stringify({ error: "unsupported protocol version: 2" })),
+    }));
+    setupBrowser({ fetchImpl: impl });
+    stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1, maxFailures: 3 });
+
+    for (let i = 0; i < 10; i++) {
+      console.log("skewed", i);
+      await sleep(15);
+    }
+    await sleep(100);
+
+    assert.equal(calls.length, 3, `expected 3 attempts, got ${calls.length}`);
+    const stopWarnings = warnings.filter((w) => w.includes("stopped forwarding logs"));
+    assert.equal(stopWarnings.length, 1);
+    assert.match(stopWarnings[0], /unsupported protocol version: 2/);
+    assert.match(stopWarnings[0], /different versions/);
+    assert.doesNotMatch(stopWarnings[0], /Forwarding continues/);
+  });
+
+  test("400 and 413 are counted separately", async () => {
+    // A 413 must not push the protocol counter toward its limit.
+    const { calls, impl } = recordingFetch((n) =>
+      n % 2 === 0
+        ? { ok: false, status: 413 }
+        : { ok: false, status: 400, text: () => Promise.resolve("{}") },
+    );
+    setupBrowser({ fetchImpl: impl });
+    stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1, maxFailures: 3 });
+
+    for (let i = 0; i < 12; i++) {
+      console.log("mixed", i);
+      await sleep(15);
+    }
+    await sleep(100);
+
+    // Three 400s arrive on calls 1, 3 and 5, so it halts around there rather
+    // than after three responses of any kind.
+    assert.ok(calls.length >= 5, `expected at least 5 attempts, got ${calls.length}`);
+    assert.equal(warnings.filter((w) => w.includes("stopped forwarding logs")).length, 1);
   });
 
   test("a 5xx does count as a reachability failure", async () => {

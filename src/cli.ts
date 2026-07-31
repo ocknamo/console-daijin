@@ -5,7 +5,7 @@
  * dependencies.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -183,7 +183,7 @@ export function normalizeOrigin(raw: string): string | null {
 }
 
 /** IPv6 literals need brackets to be a valid authority in a URL. */
-function formatHostForUrl(host: string): string {
+export function formatHostForUrl(host: string): string {
   if (host === "0.0.0.0" || host === "::") return "localhost";
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
@@ -279,4 +279,23 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
-void main();
+/**
+ * True only when this file was executed as a program.
+ *
+ * Without the guard, importing the module to test `parseArgs` or
+ * `normalizeOrigin` starts a server on 5959 and creates a log file in the
+ * caller's working directory — which is why none of the CLI logic had tests.
+ * Compared through `realpath` so the `node_modules/.bin` symlink still counts
+ * as running the program.
+ */
+function isRunningAsProgram(): boolean {
+  const invoked = process.argv[1];
+  if (invoked === undefined) return false;
+  try {
+    return realpathSync(invoked) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isRunningAsProgram()) void main();

@@ -143,9 +143,17 @@ createConsoleViewer({
 })
 ```
 
-Batches are sized by bytes, not by entry count, so a page that logs large objects cannot build a request the collector will reject. On `pagehide` and when the tab is hidden, the entire buffer is flushed with `navigator.sendBeacon` — in as many calls as it takes, since a beacon is capped at 64 KiB — so the last log before a crash or a reload is not lost.
+Batches are sized by bytes, not by entry count, so a page that logs large objects cannot build a request the collector will reject. On `pagehide` and when the tab is hidden, the buffer is flushed with `navigator.sendBeacon`, split into 64 KiB pieces because that is the beacon queue limit — so the last log before a crash or a reload is not lost. Draining stops after 32 beacons (roughly 1.9 MB); a buffer larger than that at unload is truncated, since the loop is synchronous and blocking unload indefinitely is worse.
 
-`maxFailures` counts only failures to reach the collector. A batch the collector rejects (`400`/`413`) is reported once and dropped without counting, so a busy page cannot silently disable forwarding and blame a collector that is running. If the collector really is absent, forwarding stops after `maxFailures` attempts and says so once. The panel keeps working either way.
+`maxFailures` counts only failures to reach the collector, and the three failure kinds are kept apart:
+
+| Response | Treatment |
+|----------|-----------|
+| `413` too large | That batch is dropped and reported once. Forwarding continues — the next batch is smaller. |
+| `400` malformed | Counted separately. After `maxFailures`, forwarding stops and reports the collector's own reason, since the usual cause is a version mismatch between the library and the CLI, which will not fix itself. |
+| Network error, `5xx` | Counted as unreachable. After `maxFailures`, forwarding stops and says so once. |
+
+The panel keeps working in all three cases.
 
 ### Using a dev server proxy
 

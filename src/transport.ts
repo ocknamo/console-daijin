@@ -97,17 +97,37 @@ function toLogEntry(entry: CapturedEntry, url: string | undefined): LogEntry {
   };
 }
 
-/** Cuts a single oversized entry down so it can be sent at all. */
+/** Cuts a single oversized entry down so it fits in `maxBytes`. */
 function shrinkEntry(entry: LogEntry, maxBytes: number): LogEntry {
   const budget = Math.max(256, maxBytes - ENVELOPE_BYTES);
   const perArg = Math.max(64, Math.floor(budget / Math.max(1, entry.args.length) / 3));
-  return {
+
+  let candidate: LogEntry = {
     ...entry,
     args: entry.args.map((arg) =>
       arg.length <= perArg ? arg : `${arg.slice(0, perArg)}…(truncated)`,
     ),
     ...(entry.stack !== undefined ? { stack: entry.stack.slice(0, perArg) } : {}),
   };
+
+  // Truncating each argument is not enough on its own: the per-argument floor
+  // means `console.log(...arr)` with 20,000 spread arguments still lands at
+  // 64 x 20000 x 3 bytes, over the limit the caller was promised. Drop
+  // arguments until it genuinely fits, leaving room for the marker.
+  const loopBudget = Math.max(128, budget - 64);
+  let dropped = 0;
+  while (candidate.args.length > 1 && byteLength(JSON.stringify(candidate)) > loopBudget) {
+    const keep = Math.max(1, Math.floor(candidate.args.length / 2));
+    dropped += candidate.args.length - keep;
+    candidate = { ...candidate, args: candidate.args.slice(0, keep) };
+  }
+  if (dropped > 0) {
+    candidate = {
+      ...candidate,
+      args: [...candidate.args, `…${dropped} more arguments dropped`],
+    };
+  }
+  return candidate;
 }
 
 /**
@@ -165,6 +185,8 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
   const buffer: Buffered[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let failures = 0;
+  /** 400s are counted apart from 413s: see the status handling in `send`. */
+  let protocolFailures = 0;
   let stopped = false;
   let warnedAboutPayload = false;
 
@@ -175,16 +197,31 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
     }
   };
 
-  const giveUp = (reason: string): void => {
+  /** Stops forwarding. `advice` explains what the caller should check. */
+  const halt = (message: string): void => {
     stopped = true;
     buffer.length = 0;
     clearTimer();
     // Deliberately the pristine console: routing this through the patched one
     // would capture it, forward it, fail again, and loop.
-    originalConsole.warn(
-      `[console-daijin] stopped forwarding logs after ${failures} failed attempts (${reason}). ` +
+    originalConsole.warn(`[console-daijin] ${message}`);
+  };
+
+  const giveUp = (reason: string): void =>
+    halt(
+      `stopped forwarding logs after ${failures} failed attempts (${reason}). ` +
         `Is the collector running? npx console-daijin-server`,
     );
+
+  /** Pulls the server's own explanation out of an error response body. */
+  const describeRejection = (text: string): string => {
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown };
+      if (typeof parsed.error === "string") return parsed.error;
+    } catch {
+      // Fall through to the raw body.
+    }
+    return text.slice(0, 200);
   };
 
   const encode = (entries: LogEntry[]): string => {
@@ -208,20 +245,47 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
           failures = 0;
           return;
         }
-        // 413 and 400 mean this payload was wrong, not that the collector is
-        // unreachable. Counting them as reachability failures would stop
-        // forwarding on a busy page and blame it on a collector that is in fact
-        // running and answering.
-        if (res.status === 413 || res.status === 400) {
+        // 413 says this particular batch was too big, not that the collector is
+        // unreachable. Counting it as a reachability failure would stop
+        // forwarding on a busy page and blame a collector that is running and
+        // answering. The next, smaller batch may well succeed.
+        if (res.status === 413) {
           if (!warnedAboutPayload) {
             warnedAboutPayload = true;
             originalConsole.warn(
-              `[console-daijin] the collector rejected a batch (${res.status}); that batch was ` +
-                `dropped. Forwarding continues.`,
+              `[console-daijin] the collector rejected a batch as too large (413); that batch ` +
+                `was dropped. Forwarding continues.`,
             );
           }
           return;
         }
+
+        // 400 is different again: the commonest cause is a protocol version
+        // mismatch, which is permanent. The client and the collector are
+        // installed and updated separately, so skew is an ordinary situation,
+        // and treating it like an oversized batch would report "forwarding
+        // continues" forever while nothing at all arrived.
+        if (res.status === 400) {
+          protocolFailures += 1;
+          if (protocolFailures >= maxFailures) {
+            res.text().then(
+              (text) =>
+                halt(
+                  `stopped forwarding logs: the collector rejected ${protocolFailures} batches as ` +
+                    `malformed (${describeRejection(text)}). This usually means the browser ` +
+                    `library and console-daijin-server are different versions.`,
+                ),
+              () =>
+                halt(
+                  `stopped forwarding logs: the collector rejected ${protocolFailures} batches ` +
+                    `as malformed (400). Check that the browser library and ` +
+                    `console-daijin-server are the same version.`,
+                ),
+            );
+          }
+          return;
+        }
+
         failures += 1;
         if (failures >= maxFailures) giveUp(`server responded ${res.status}`);
       },

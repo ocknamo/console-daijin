@@ -26,6 +26,12 @@ createConsoleViewer()
 
 That's it. A fixed panel appears at the bottom of the page showing all console output.
 
+`createConsoleViewer` returns a dispose function. Calling it removes the panel and stops capturing — use it wherever the setup can run twice, such as React StrictMode or a Vite HMR boundary:
+
+```ts
+useEffect(() => createConsoleViewer(), [])
+```
+
 ---
 
 ## Options
@@ -137,9 +143,9 @@ createConsoleViewer({
 })
 ```
 
-Logs are batched rather than sent one request per line, and flushed with `navigator.sendBeacon` on `pagehide` and when the tab is hidden — so the last log before a crash or a reload is not lost.
+Batches are sized by bytes, not by entry count, so a page that logs large objects cannot build a request the collector will reject. On `pagehide` and when the tab is hidden, the entire buffer is flushed with `navigator.sendBeacon` — in as many calls as it takes, since a beacon is capped at 64 KiB — so the last log before a crash or a reload is not lost.
 
-If the collector is not running, forwarding stops itself after `maxFailures` attempts and reports it once. The panel keeps working.
+`maxFailures` counts only failures to reach the collector. A batch the collector rejects (`400`/`413`) is reported once and dropped without counting, so a busy page cannot silently disable forwarding and blame a collector that is running. If the collector really is absent, forwarding stops after `maxFailures` attempts and says so once. The panel keeps working either way.
 
 ### Using a dev server proxy
 
@@ -165,10 +171,14 @@ The equivalent in Next.js is a `rewrites()` entry. No plugin is needed in either
 This is a development tool. It is built to be safe on a developer's machine, not to be exposed:
 
 - The server binds to `127.0.0.1`, so it is not reachable from other machines. `--host` overrides this and prints a warning.
-- Requests carrying an `Origin` that is not loopback are rejected with `403`. Any site you visit can reach `localhost`, and the collected logs are meant to be read by tools and agents, so this check is what keeps an unrelated tab from writing into them. Use `--allow-origin` to extend the list deliberately.
+- Requests carrying an `Origin` that is not loopback are rejected with `403`. Any site you visit can reach `localhost`, and the collected logs are meant to be read by tools and agents, so this check is what keeps an unrelated tab from writing into them. Use `--allow-origin` to extend the list deliberately; values are validated and normalized at startup, so a malformed origin fails loudly instead of never matching.
+- While bound to loopback, the `Host` header must also name a loopback address. This blocks DNS rebinding, where a hostile name resolves to `127.0.0.1` but still identifies itself in `Host`.
 - `Access-Control-Allow-Origin` is never `*`; only an accepted origin is echoed back.
-- Request bodies are capped at 1 MB.
+- Request bodies are capped at 1 MB and 1000 entries.
+- **Log text is treated as untrusted.** Control characters and ANSI escapes in captured arguments are neutralized before they reach stdout. Without that, a third-party script, an npm dependency, or an API response passed to `console.log` could clear your terminal or forge log lines at any level — and none of that is something an `Origin` check can see.
 - The client refuses to forward when the page is not served from a loopback host, so a build that accidentally ships with `forward` enabled will not send your users' console output to whatever is listening on their machines. `allowNonLocal: true` overrides this.
+
+One caveat on `--allow-origin` combined with `allowNonLocal`: Chrome's Private Network Access rules require a preflight for requests from a public page to a loopback address. The server answers that preflight, but the feature depends on browser behaviour that varies by version and policy, and the loopback-to-loopback path is the one that is routinely exercised. Treat public-origin forwarding as best effort.
 
 ### Protocol
 

@@ -5,11 +5,17 @@
  * and to a JSONL file. Uses `node:http` only, so the package keeps zero
  * runtime dependencies.
  *
- * Security posture: this server exists to be talked to by a page running on
- * the developer's own machine, and its output is meant to be read by tools and
- * agents. Any site the developer visits can also reach `localhost`, so the
- * origin check below is the thing standing between "my dev server" and "any
- * tab writing arbitrary text into a file an agent trusts". It is not optional.
+ * Security posture. Two distinct threats, and it took a review to notice the
+ * second one:
+ *
+ *  1. Another tab. Any site the developer visits can reach `localhost`, so the
+ *     origin check below is what stands between "my dev server" and "any tab
+ *     writing into a file an agent trusts". The `Host` check covers the DNS
+ *     rebinding variant of the same idea.
+ *  2. The developer's own page. Everything in `args` is attacker-influenced in
+ *     the ordinary case — a third-party script, an npm dependency, or an API
+ *     response passed straight to `console.log`. Origin checks say nothing
+ *     about that content, so it is sanitized before it reaches a terminal.
  */
 
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
@@ -22,10 +28,12 @@ import {
 import { dirname, resolve as resolvePath } from "node:path";
 
 import {
+  DEFAULT_HOST,
   HEALTH_PATH,
   LOGS_PATH,
   MAX_BODY_BYTES,
   PROTOCOL_VERSION,
+  isLoopbackHostname,
   isLoopbackOrigin,
   parseLogBatch,
   type LogEntry,
@@ -68,6 +76,25 @@ const ANSI: Record<LogLevel, string> = {
 const ANSI_RESET = "\u001b[0m";
 const ANSI_DIM = "\u001b[2m";
 
+/** C0 and C1 controls plus DEL, keeping tab (09) and newline (0A). */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
+
+/**
+ * Renders page-supplied text inert for a terminal.
+ *
+ * Without this, `ESC[2J` clears the screen and a bare `\r` rewinds past the
+ * timestamp and level prefix, letting a page forge log lines at any level and
+ * any time. Colour being disabled does not help: the bytes come from the
+ * payload, not from us. The JSONL side is already safe because
+ * `JSON.stringify` escapes these.
+ */
+export function sanitizeForTerminal(text: string): string {
+  return text.replace(
+    CONTROL_CHARS,
+    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+  );
+}
+
 /**
  * Cross-origin POSTs always carry `Origin`, so rejecting non-loopback values
  * blocks the drive-by case while leaving curl and other non-browser clients
@@ -87,6 +114,33 @@ export function isAllowedOrigin(
   return isLoopbackOrigin(origin);
 }
 
+/**
+ * Second line of defence, against DNS rebinding: a hostile name that resolves
+ * to 127.0.0.1 still sends its own name in `Host`. Only enforced while bound to
+ * loopback, so deliberately exposing the server with `--host` still works.
+ */
+export function isAllowedHost(
+  hostHeader: string | undefined,
+  bindHost: string,
+  allowOrigins: readonly string[],
+): boolean {
+  if (!isLoopbackHostname(bindHost)) return true;
+  if (hostHeader === undefined) return false;
+
+  const hostname = hostHeader.startsWith("[")
+    ? hostHeader.slice(0, hostHeader.indexOf("]") + 1)
+    : hostHeader.split(":")[0];
+
+  if (isLoopbackHostname(hostname)) return true;
+  return allowOrigins.some((origin) => {
+    try {
+      return new URL(origin).hostname === hostname;
+    } catch {
+      return false;
+    }
+  });
+}
+
 class JsonlWriter {
   private stream: WriteStream;
 
@@ -96,6 +150,9 @@ class JsonlWriter {
   }
 
   write(record: unknown): void {
+    // Node buffers past the high-water mark rather than dropping. Losing log
+    // lines would be worse than buffering, and MAX_ENTRIES_PER_BATCH bounds how
+    // fast a single request can feed this.
     this.stream.write(`${JSON.stringify(record)}\n`);
   }
 
@@ -113,7 +170,7 @@ function formatTimestamp(t: number): string {
 function renderEntry(entry: LogEntry, color: boolean): string {
   const time = formatTimestamp(entry.t);
   const label = entry.level.padEnd(8);
-  const body = entry.args.join(" ");
+  const body = sanitizeForTerminal(entry.args.join(" "));
   // Keep continuation lines of a stack trace visually attached to their header.
   const indented = body.replace(/\n/g, "\n            ");
 
@@ -135,11 +192,17 @@ function sendCors(
   }
 }
 
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  payload: unknown,
+  headers: Record<string, string> = {},
+): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
+    ...headers,
   });
   res.end(body);
 }
@@ -176,6 +239,14 @@ function readBody(req: IncomingMessage, limit: number): Promise<BodyResult> {
       if (!overflowed) resolve({ ok: true, text: Buffer.concat(chunks).toString("utf8") });
     });
     req.on("error", reject);
+    // A socket that simply closes mid-body emits neither `end` nor `error`.
+    // Reloading a page aborts its in-flight POST, so this is a routine path,
+    // and without it the promise and its buffer are never released.
+    req.on("close", () => {
+      if (!overflowed && !req.readableEnded) {
+        reject(new Error("client closed the connection before the body ended"));
+      }
+    });
   });
 }
 
@@ -184,6 +255,7 @@ export function createLogServer(options: LogServerOptions = {}): {
   writer: JsonlWriter | null;
 } {
   const allowOrigins = options.allowOrigins ?? [];
+  const bindHost = options.host ?? DEFAULT_HOST;
   const quiet = options.quiet ?? false;
   const write = options.write ?? ((line: string) => process.stdout.write(`${line}\n`));
   const color =
@@ -196,43 +268,60 @@ export function createLogServer(options: LogServerOptions = {}): {
 
   const server = createServer((req, res) => {
     const origin = req.headers.origin;
-    const allowed = isAllowedOrigin(origin, allowOrigins);
-    const url = req.url ?? "/";
-    const path = url.split("?")[0];
+    const path = (req.url ?? "/").split("?")[0];
 
-    if (!allowed) {
+    if (!isAllowedOrigin(origin, allowOrigins)) {
       sendCors(res, origin, false);
       sendJson(res, 403, { error: "origin not allowed", origin });
       return;
     }
+    if (!isAllowedHost(req.headers.host, bindHost, allowOrigins)) {
+      sendCors(res, origin, false);
+      sendJson(res, 403, { error: "host not allowed", host: req.headers.host });
+      return;
+    }
     sendCors(res, origin, true);
 
+    // Path first: answering OPTIONS before this told callers that any URL on
+    // this server accepts POST.
+    const allowedMethods =
+      path === LOGS_PATH ? "POST, OPTIONS" : path === HEALTH_PATH ? "GET, HEAD, OPTIONS" : null;
+
+    if (allowedMethods === null) {
+      sendJson(res, 404, { error: "not found", path });
+      return;
+    }
+
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-methods": "POST, OPTIONS",
+      const preflight: Record<string, string> = {
+        allow: allowedMethods,
+        "access-control-allow-methods": allowedMethods,
         "access-control-allow-headers": "content-type",
         "access-control-max-age": "86400",
-      });
+      };
+      // Chrome's Private Network Access forces a preflight for public-page ->
+      // loopback requests even when the request would otherwise be CORS-simple,
+      // and requires this header to proceed. Answering it only widens things
+      // for origins that already passed the check above.
+      if (req.headers["access-control-request-private-network"] === "true") {
+        preflight["access-control-allow-private-network"] = "true";
+      }
+      res.writeHead(204, preflight);
       res.end();
       return;
     }
 
     if (path === HEALTH_PATH) {
       if (req.method !== "GET" && req.method !== "HEAD") {
-        sendJson(res, 405, { error: "method not allowed" });
+        sendJson(res, 405, { error: "method not allowed" }, { allow: allowedMethods });
         return;
       }
       sendJson(res, 200, { ok: true, v: PROTOCOL_VERSION });
       return;
     }
 
-    if (path !== LOGS_PATH) {
-      sendJson(res, 404, { error: "not found", path });
-      return;
-    }
-
     if (req.method !== "POST") {
-      sendJson(res, 405, { error: "method not allowed" });
+      sendJson(res, 405, { error: "method not allowed" }, { allow: allowedMethods });
       return;
     }
 
@@ -273,7 +362,8 @@ export function createLogServer(options: LogServerOptions = {}): {
         res.end();
       },
       () => {
-        // Request stream errored (client went away mid-upload); nothing to log.
+        // The client went away mid-upload; there may be nobody left to answer.
+        if (res.destroyed || res.writableEnded) return;
         if (!res.headersSent) {
           sendJson(res, 400, { error: "failed to read request body" });
         } else {
@@ -289,9 +379,9 @@ export function createLogServer(options: LogServerOptions = {}): {
 export function startLogServer(
   options: LogServerOptions = {},
 ): Promise<LogServerHandle> {
-  const host = options.host ?? "127.0.0.1";
+  const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? 0;
-  const { server, writer } = createLogServer(options);
+  const { server, writer } = createLogServer({ ...options, host });
 
   return new Promise((resolve, reject) => {
     const onError = (err: NodeJS.ErrnoException) => {

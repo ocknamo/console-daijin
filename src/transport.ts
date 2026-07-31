@@ -1,19 +1,26 @@
 /**
  * Browser to collector transport.
  *
- * Three things this has to get right, all of which are easy to get wrong:
+ * Four things this has to get right, all of which are easy to get wrong:
  *  - Batching. One request per log line falls over the first time someone logs
  *    inside a loop.
+ *  - Sizing. Counting entries says nothing about bytes: 200 entries of five
+ *    10,000-character arguments is ~9.5 MB, which the server rejects. Batches
+ *    are therefore measured in bytes.
  *  - Unload. The most valuable log is usually the last one before a crash or a
- *    reload, and a plain `fetch` in flight at that moment is discarded.
- *  - Failing quietly. When the collector is not running, every log must not
- *    turn into a failed request, and reporting the failure must never go
- *    through the patched console.
+ *    reload, so the whole buffer is drained with `sendBeacon` — all of it, not
+ *    the first batch — and the failure return is honoured.
+ *  - Failing quietly, and for the right reason. When the collector is not
+ *    running, every log must not turn into a failed request; reporting that
+ *    must never go through the patched console; and a rejected payload must
+ *    not be reported as "the collector isn't running".
  */
 
 import { originalConsole, subscribe, type CapturedEntry } from "./capture";
 import {
   DEFAULT_PORT,
+  MAX_BODY_BYTES,
+  MAX_ENTRIES_PER_BATCH,
   PROTOCOL_VERSION,
   defaultEndpoint,
   isLoopbackHostname,
@@ -30,7 +37,7 @@ export interface ForwardOptions {
   batchMs?: number;
   /** Flush as soon as this many entries are buffered. Default 50. */
   batchSize?: number;
-  /** Consecutive failures tolerated before giving up. Default 3. */
+  /** Consecutive network failures tolerated before giving up. Default 3. */
   maxFailures?: number;
   /**
    * Forward even when the page is not served from a loopback host.
@@ -43,8 +50,34 @@ export interface ForwardOptions {
 
 /** Hard cap on buffered entries while the collector is unreachable. */
 const MAX_BUFFER = 1000;
-/** Hard cap per request, to stay well clear of the server's 1 MB body limit. */
-const MAX_BATCH_ENTRIES = 200;
+
+/** Half the server's limit, leaving room for the envelope and for growth. */
+const MAX_BATCH_BYTES = Math.floor(MAX_BODY_BYTES / 2);
+
+/**
+ * `sendBeacon` is capped by the browser's beacon queue, 64 KiB in practice.
+ * Over that it returns false and the payload never leaves.
+ */
+const MAX_BEACON_BYTES = 60 * 1024;
+
+/** Rough size of `{"v":1,"session":"…","entries":[]}` plus separators. */
+const ENVELOPE_BYTES = 128;
+
+/** Bound on beacon flush iterations, so unload can never spin. */
+const MAX_DRAIN_ROUNDS = 32;
+
+interface Buffered {
+  entry: LogEntry;
+  bytes: number;
+}
+
+const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+
+function byteLength(text: string): number {
+  // Without TextEncoder, assume the worst realistic UTF-8 expansion so the
+  // estimate stays conservative rather than optimistic.
+  return encoder !== null ? encoder.encode(text).length : text.length * 3;
+}
 
 function makeSessionId(): string {
   const cryptoObj = globalThis.crypto as Crypto | undefined;
@@ -62,6 +95,44 @@ function toLogEntry(entry: CapturedEntry, url: string | undefined): LogEntry {
     ...(entry.stack !== undefined ? { stack: entry.stack } : {}),
     ...(url !== undefined ? { url } : {}),
   };
+}
+
+/** Cuts a single oversized entry down so it can be sent at all. */
+function shrinkEntry(entry: LogEntry, maxBytes: number): LogEntry {
+  const budget = Math.max(256, maxBytes - ENVELOPE_BYTES);
+  const perArg = Math.max(64, Math.floor(budget / Math.max(1, entry.args.length) / 3));
+  return {
+    ...entry,
+    args: entry.args.map((arg) =>
+      arg.length <= perArg ? arg : `${arg.slice(0, perArg)}…(truncated)`,
+    ),
+    ...(entry.stack !== undefined ? { stack: entry.stack.slice(0, perArg) } : {}),
+  };
+}
+
+/**
+ * Removes entries from the front of the buffer while they fit in `maxBytes`.
+ * Always yields at least one entry so a single huge record cannot wedge the
+ * queue; that entry is shrunk instead.
+ */
+function takeBatch(buffer: Buffered[], maxBytes: number): LogEntry[] {
+  const taken: LogEntry[] = [];
+  let bytes = ENVELOPE_BYTES;
+
+  while (buffer.length > 0 && taken.length < MAX_ENTRIES_PER_BATCH) {
+    const next = buffer[0];
+    if (taken.length > 0 && bytes + next.bytes > maxBytes) break;
+
+    buffer.shift();
+    if (taken.length === 0 && bytes + next.bytes > maxBytes) {
+      taken.push(shrinkEntry(next.entry, maxBytes));
+      break;
+    }
+    taken.push(next.entry);
+    bytes += next.bytes;
+  }
+
+  return taken;
 }
 
 /**
@@ -91,10 +162,11 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
   }
 
   const session = makeSessionId();
-  const buffer: LogEntry[] = [];
+  const buffer: Buffered[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let failures = 0;
   let stopped = false;
+  let warnedAboutPayload = false;
 
   const clearTimer = (): void => {
     if (timer !== null) {
@@ -115,7 +187,12 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
     );
   };
 
-  const send = (body: string): void => {
+  const encode = (entries: LogEntry[]): string => {
+    const batch: LogBatch = { v: PROTOCOL_VERSION, session, entries };
+    return JSON.stringify(batch);
+  };
+
+  const send = (body: string, keepalive: boolean): void => {
     // `text/plain` keeps this a CORS-simple request, so there is no preflight
     // to lose. The server's Origin check, not the content type, is what makes
     // the endpoint safe.
@@ -124,10 +201,25 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
       headers: { "content-type": "text/plain;charset=UTF-8" },
       body,
       credentials: "omit",
+      keepalive,
     }).then(
       (res) => {
         if (res.ok) {
           failures = 0;
+          return;
+        }
+        // 413 and 400 mean this payload was wrong, not that the collector is
+        // unreachable. Counting them as reachability failures would stop
+        // forwarding on a busy page and blame it on a collector that is in fact
+        // running and answering.
+        if (res.status === 413 || res.status === 400) {
+          if (!warnedAboutPayload) {
+            warnedAboutPayload = true;
+            originalConsole.warn(
+              `[console-daijin] the collector rejected a batch (${res.status}); that batch was ` +
+                `dropped. Forwarding continues.`,
+            );
+          }
           return;
         }
         failures += 1;
@@ -142,43 +234,62 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
     );
   };
 
-  const flush = (viaBeacon: boolean): void => {
+  const flush = (): void => {
     if (stopped || buffer.length === 0) return;
     clearTimer();
 
-    const entries = buffer.splice(0, MAX_BATCH_ENTRIES);
-    const batch: LogBatch = { v: PROTOCOL_VERSION, session, entries };
-    const body = JSON.stringify(batch);
-
-    if (viaBeacon && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
-      navigator.sendBeacon(endpoint, new Blob([body], { type: "text/plain;charset=UTF-8" }));
-    } else {
-      send(body);
-    }
+    const entries = takeBatch(buffer, MAX_BATCH_BYTES);
+    if (entries.length > 0) send(encode(entries), false);
 
     // A burst larger than one batch keeps draining on subsequent ticks.
-    if (buffer.length > 0 && !viaBeacon) {
-      timer = setTimeout(() => flush(false), 0);
+    if (buffer.length > 0) timer = setTimeout(flush, 0);
+  };
+
+  /** Unload path: get everything out now, or lose it. */
+  const flushBeacon = (): void => {
+    if (stopped || buffer.length === 0) return;
+    clearTimer();
+
+    const canBeacon =
+      typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function";
+
+    for (let round = 0; round < MAX_DRAIN_ROUNDS && buffer.length > 0; round++) {
+      const entries = takeBatch(buffer, canBeacon ? MAX_BEACON_BYTES : MAX_BATCH_BYTES);
+      if (entries.length === 0) break;
+      const body = encode(entries);
+
+      if (!canBeacon) {
+        send(body, true);
+        continue;
+      }
+      // The entries are already out of the buffer, so a false return here is
+      // total loss unless it is followed up.
+      const queued = navigator.sendBeacon(
+        endpoint,
+        new Blob([body], { type: "text/plain;charset=UTF-8" }),
+      );
+      if (!queued) send(body, true);
     }
   };
 
   const unsubscribe = subscribe((entry) => {
     if (stopped) return;
 
-    buffer.push(toLogEntry(entry, window.location?.href));
+    const logEntry = toLogEntry(entry, window.location?.href);
+    buffer.push({ entry: logEntry, bytes: byteLength(JSON.stringify(logEntry)) + 1 });
     if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
 
     if (buffer.length >= batchSize) {
-      flush(false);
+      flush();
     } else if (timer === null) {
-      timer = setTimeout(() => flush(false), batchMs);
+      timer = setTimeout(flush, batchMs);
     }
   });
 
   const onVisibilityChange = (): void => {
-    if (document.visibilityState === "hidden") flush(true);
+    if (document.visibilityState === "hidden") flushBeacon();
   };
-  const onPageHide = (): void => flush(true);
+  const onPageHide = (): void => flushBeacon();
 
   document.addEventListener("visibilitychange", onVisibilityChange);
   window.addEventListener("pagehide", onPageHide);
@@ -187,7 +298,7 @@ export function startForwarding(options: ForwardOptions = {}): () => void {
     unsubscribe();
     document.removeEventListener("visibilitychange", onVisibilityChange);
     window.removeEventListener("pagehide", onPageHide);
-    flush(true);
+    flushBeacon();
     clearTimer();
     stopped = true;
   };

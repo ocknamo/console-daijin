@@ -38,13 +38,22 @@ export function forwardConsoleLogs(options: ForwardOptions = {}): () => void {
   return startForwarding(options);
 }
 
-export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
+/**
+ * Renders the panel and starts capturing.
+ *
+ * Returns a dispose function that removes the panel, stops rendering into it,
+ * and stops forwarding. Calling this twice without disposing stacks two panels
+ * and two forwarders — React StrictMode and Vite HMR both do exactly that — so
+ * the return value is the supported way to keep it to one.
+ */
+export function createConsoleViewer(options: ConsoleViewerOptions = {}): () => void {
+  const noop = (): void => {};
   const { show = "always", height = 200, forward = false } = options;
 
   // Visibility gate
   const isInsideIframe = window.self !== window.top;
   if (show === "auto" || show === "iframe") {
-    if (!isInsideIframe) return;
+    if (!isInsideIframe) return noop;
   }
 
   const HEADER_H = 26;
@@ -64,6 +73,7 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
     "font-size:12px",
   ].join(";");
   document.body.appendChild(wrapper);
+  const previousPaddingBottom = document.body.style.paddingBottom;
   document.body.style.paddingBottom = `${height}px`;
 
   // ---- Header ----
@@ -301,9 +311,18 @@ export function createConsoleViewer(options: ConsoleViewerOptions = {}): void {
 
   ensureConsoleHooks();
   ensureUncaughtHooks();
-  subscribe(appendEntry);
+  const unsubscribe = subscribe(appendEntry);
 
-  if (forward !== false) {
-    startForwarding(forward === true ? {} : forward);
-  }
+  const stopForwarding =
+    forward === false ? noop : startForwarding(forward === true ? {} : forward);
+
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribe();
+    stopForwarding();
+    wrapper.remove();
+    document.body.style.paddingBottom = previousPaddingBottom;
+  };
 }

@@ -8,7 +8,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_HOST, DEFAULT_PORT, HEALTH_PATH, LOGS_PATH } from "./protocol";
+import {
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  HEALTH_PATH,
+  LOGS_PATH,
+  isLoopbackHostname,
+} from "./protocol";
 import { startLogServer } from "./server";
 
 const DEFAULT_OUT = ".console-daijin/logs.jsonl";
@@ -80,7 +86,14 @@ export function parseArgs(argv: readonly string[]): ParsedArgs | { error: string
     const eq = arg.indexOf("=");
     const flag = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
     const inlineValue = arg.startsWith("--") && eq !== -1 ? arg.slice(eq + 1) : undefined;
-    const takeValue = (): string | undefined => inlineValue ?? argv[++i];
+    // A bare `--out --quiet` must not silently create a file called "--quiet".
+    const takeValue = (): string | undefined => {
+      if (inlineValue !== undefined) return inlineValue;
+      const next = argv[i + 1];
+      if (next === undefined || (next.startsWith("-") && next !== "-")) return undefined;
+      i++;
+      return next;
+    };
 
     switch (flag) {
       case "-p":
@@ -118,7 +131,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs | { error: string
       case "--allow-origin": {
         const raw = takeValue();
         if (raw === undefined) return { error: "--allow-origin requires a value" };
-        parsed.allowOrigins.push(raw);
+        const normalized = normalizeOrigin(raw);
+        if (normalized === null) {
+          return {
+            error:
+              `invalid origin: ${raw} (expected a scheme and host, such as ` +
+              `https://app.example.com, or the literal "null")`,
+          };
+        }
+        parsed.allowOrigins.push(normalized);
         break;
       }
       case "-h":
@@ -141,6 +162,30 @@ function toPort(raw: string): number | null {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > 65535) return null;
   return n;
+}
+
+/**
+ * Origins are compared for exact equality by the server, and the format is
+ * easy to get subtly wrong — a trailing slash or a missing scheme would simply
+ * never match, with no error at any point. This is the one option that widens
+ * a security boundary, so it gets the strictest validation, not the loosest.
+ */
+export function normalizeOrigin(raw: string): string | null {
+  if (raw === "null") return "null";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.origin === "null" || url.protocol === "file:") return null;
+  return url.origin;
+}
+
+/** IPv6 literals need brackets to be a valid authority in a URL. */
+function formatHostForUrl(host: string): string {
+  if (host === "0.0.0.0" || host === "::") return "localhost";
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 function banner(endpointBase: string, outPath: string | null): string {
@@ -210,10 +255,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  const displayHost = handle.host === "0.0.0.0" || handle.host === "::" ? "localhost" : handle.host;
-  process.stdout.write(banner(`http://${displayHost}:${handle.port}`, handle.outPath));
+  process.stdout.write(
+    banner(`http://${formatHostForUrl(handle.host)}:${handle.port}`, handle.outPath),
+  );
 
-  if (handle.host !== "127.0.0.1" && handle.host !== "::1" && handle.host !== "localhost") {
+  // Shares one definition of "loopback" with the client and the server, rather
+  // than a hand-written list that called 127.0.0.2 a network address.
+  if (!isLoopbackHostname(handle.host)) {
     process.stderr.write(
       `  warning: bound to ${handle.host}; other machines on your network can post logs here.\n\n`,
     );

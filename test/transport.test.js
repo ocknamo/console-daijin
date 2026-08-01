@@ -89,41 +89,31 @@ describe("batching", () => {
     assert.equal(sent.length, 120, "every entry should reach the collector");
   });
 
-  test("a single oversized entry is shrunk rather than wedging the queue", async () => {
+  test("an entry too large to send is replaced, not left to wedge the queue", async () => {
     const { calls, impl } = recordingFetch();
     setupBrowser({ fetchImpl: impl });
     stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1000 });
 
-    // 200 arguments of 10 KB each lands in one entry far bigger than a batch.
-    console.log(...Array.from({ length: 200 }, () => "y".repeat(10_000)));
-    await sleep(200);
-
-    assert.ok(calls.length >= 1, "the entry should still be sent");
-    for (const call of calls) {
-      assert.ok(Buffer.byteLength(call.body, "utf8") < MAX_BODY_BYTES);
-    }
-  });
-
-  test("shrinking holds even for a huge spread, by dropping arguments", async () => {
-    // Truncating each argument is not enough on its own: a per-argument floor
-    // times 20,000 arguments is still over the limit. `console.log(...arr)`
-    // with a big array is an ordinary accident.
-    const { calls, impl } = recordingFetch();
-    setupBrowser({ fetchImpl: impl });
-    stop = forwardConsoleLogs({ batchMs: 5, batchSize: 1000 });
-
+    // `console.log(...arr)` on a big array is an ordinary accident, and the
+    // result is far past anything the collector will accept.
     console.log(...Array.from({ length: 20_000 }, () => "q".repeat(500)));
+    console.log("this one is fine");
     await sleep(400);
 
-    assert.ok(calls.length >= 1, "the entry should still be sent");
+    assert.ok(calls.length >= 1);
     for (const call of calls) {
       const bytes = Buffer.byteLength(call.body, "utf8");
       assert.ok(bytes < MAX_BODY_BYTES, `body of ${bytes} bytes exceeds the 1 MB limit`);
     }
+
     const args = calls.flatMap((c) => JSON.parse(c.body).entries).flatMap((e) => e.args);
     assert.ok(
-      args.some((a) => /more arguments dropped/.test(a)),
-      "dropping arguments should be visible in the output",
+      args.some((a) => /dropped one \d+ KB log entry/.test(a)),
+      "the drop should be reported in the stream, with its size",
+    );
+    assert.ok(
+      args.some((a) => a.includes("this one is fine")),
+      "one oversized entry must not block the entries behind it",
     );
   });
 

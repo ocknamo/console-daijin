@@ -97,37 +97,23 @@ function toLogEntry(entry: CapturedEntry, url: string | undefined): LogEntry {
   };
 }
 
-/** Cuts a single oversized entry down so it fits in `maxBytes`. */
-function shrinkEntry(entry: LogEntry, maxBytes: number): LogEntry {
-  const budget = Math.max(256, maxBytes - ENVELOPE_BYTES);
-  const perArg = Math.max(64, Math.floor(budget / Math.max(1, entry.args.length) / 3));
-
-  let candidate: LogEntry = {
-    ...entry,
-    args: entry.args.map((arg) =>
-      arg.length <= perArg ? arg : `${arg.slice(0, perArg)}…(truncated)`,
-    ),
-    ...(entry.stack !== undefined ? { stack: entry.stack.slice(0, perArg) } : {}),
+/**
+ * Stands in for an entry too large to send.
+ *
+ * Trimming such an entry down to fit was not worth what it cost: the sizes
+ * involved only arise from an accident like `console.log(...bigArray)`, and
+ * part of an accidental log is not more useful than a note saying it happened.
+ * Reporting the size gives the reader enough to find it.
+ */
+function placeholderFor(entry: LogEntry, bytes: number): LogEntry {
+  return {
+    t: entry.t,
+    level: entry.level,
+    args: [
+      `[console-daijin] dropped one ${Math.round(bytes / 1024)} KB log entry: too large to send`,
+    ],
+    ...(entry.url !== undefined ? { url: entry.url } : {}),
   };
-
-  // Truncating each argument is not enough on its own: the per-argument floor
-  // means `console.log(...arr)` with 20,000 spread arguments still lands at
-  // 64 x 20000 x 3 bytes, over the limit the caller was promised. Drop
-  // arguments until it genuinely fits, leaving room for the marker.
-  const loopBudget = Math.max(128, budget - 64);
-  let dropped = 0;
-  while (candidate.args.length > 1 && byteLength(JSON.stringify(candidate)) > loopBudget) {
-    const keep = Math.max(1, Math.floor(candidate.args.length / 2));
-    dropped += candidate.args.length - keep;
-    candidate = { ...candidate, args: candidate.args.slice(0, keep) };
-  }
-  if (dropped > 0) {
-    candidate = {
-      ...candidate,
-      args: [...candidate.args, `…${dropped} more arguments dropped`],
-    };
-  }
-  return candidate;
 }
 
 /**
@@ -145,7 +131,7 @@ function takeBatch(buffer: Buffered[], maxBytes: number): LogEntry[] {
 
     buffer.shift();
     if (taken.length === 0 && bytes + next.bytes > maxBytes) {
-      taken.push(shrinkEntry(next.entry, maxBytes));
+      taken.push(placeholderFor(next.entry, next.bytes));
       break;
     }
     taken.push(next.entry);

@@ -84,7 +84,7 @@ Original console output is always preserved — DevTools continue to work normal
 
 The panel solves "I can't see the logs". This solves "something else needs to read the logs" — a second terminal, a test run, or a coding agent that cannot open DevTools.
 
-Start the collector in one terminal:
+Start the collector in one terminal (Node 20 or newer):
 
 ```bash
 npx console-daijin-server

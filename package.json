@@ -33,6 +33,9 @@
   "bin": {
     "console-daijin-server": "./dist/cli.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "files": [
     "dist"
   ],

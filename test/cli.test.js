@@ -64,11 +64,17 @@ describe("parseArgs", () => {
 
   test("refuses a value that is really the next flag", () => {
     // `--out --quiet` used to create a file literally named "--quiet".
-    assert.deepEqual(parseArgs(["--out", "--quiet"]), { error: "--out requires a value" });
-    assert.deepEqual(parseArgs(["--out"]), { error: "--out requires a value" });
-    assert.deepEqual(parseArgs(["--allow-origin", "-q"]), {
-      error: "--allow-origin requires a value",
-    });
+    // The message comes from node:util now, so assert the behaviour and that
+    // the offending option is named, not the exact wording.
+    for (const argv of [["--out", "--quiet"], ["--out"], ["--allow-origin", "-q"]]) {
+      const result = parseArgs(argv);
+      assert.ok("error" in result, `expected ${argv.join(" ")} to be rejected`);
+      assert.match(result.error, /--out|--allow-origin/);
+    }
+  });
+
+  test("rejects stray positional arguments", () => {
+    assert.ok("error" in parseArgs(["logs.jsonl"]));
   });
 
   test("rejects invalid ports", () => {
@@ -78,7 +84,9 @@ describe("parseArgs", () => {
   });
 
   test("rejects an unknown option instead of ignoring it", () => {
-    assert.deepEqual(parseArgs(["--nope"]), { error: "unknown option: --nope" });
+    const result = parseArgs(["--nope"]);
+    assert.ok("error" in result);
+    assert.match(result.error, /--nope/);
   });
 
   test("validates and normalizes --allow-origin", () => {

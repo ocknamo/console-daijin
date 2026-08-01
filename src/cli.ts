@@ -7,6 +7,7 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { parseArgs as nodeParseArgs } from "node:util";
 
 import {
   DEFAULT_HOST,
@@ -62,97 +63,80 @@ Notes
   Changing --host exposes your logs to the network; only do that deliberately.
 `;
 
+/**
+ * Option table for `node:util`'s parser. Everything structural — unknown
+ * options, missing values, repeated `--allow-origin`, `--flag=value`, values
+ * that look like another flag — is handled there, with better messages than a
+ * hand-rolled loop produced. Only the value semantics are left below.
+ */
+const OPTIONS = {
+  port: { type: "string", short: "p" },
+  host: { type: "string" },
+  out: { type: "string", short: "o" },
+  append: { type: "boolean" },
+  "no-file": { type: "boolean" },
+  quiet: { type: "boolean", short: "q" },
+  "allow-origin": { type: "string", multiple: true },
+  help: { type: "boolean", short: "h" },
+  version: { type: "boolean", short: "v" },
+} as const;
+
 export function parseArgs(argv: readonly string[]): ParsedArgs | { error: string } {
-  const envPort = process.env.CONSOLE_DAIJIN_PORT;
+  let values: {
+    port?: string;
+    host?: string;
+    out?: string;
+    append?: boolean;
+    "no-file"?: boolean;
+    quiet?: boolean;
+    "allow-origin"?: string[];
+    help?: boolean;
+    version?: boolean;
+  };
+  try {
+    ({ values } = nodeParseArgs({
+      args: [...argv],
+      options: OPTIONS,
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+
   const parsed: ParsedArgs = {
     port: DEFAULT_PORT,
-    host: DEFAULT_HOST,
-    out: DEFAULT_OUT,
-    append: false,
-    quiet: false,
+    host: values.host ?? DEFAULT_HOST,
+    out: values["no-file"] === true ? null : (values.out ?? DEFAULT_OUT),
+    append: values.append === true,
+    quiet: values.quiet === true,
     allowOrigins: [],
-    help: false,
-    version: false,
+    help: values.help === true,
+    version: values.version === true,
   };
 
+  const envPort = process.env.CONSOLE_DAIJIN_PORT;
   if (envPort !== undefined && envPort !== "") {
     const port = toPort(envPort);
     if (port === null) return { error: `invalid CONSOLE_DAIJIN_PORT: ${envPort}` };
     parsed.port = port;
   }
+  if (values.port !== undefined) {
+    const port = toPort(values.port);
+    if (port === null) return { error: `invalid port: ${values.port}` };
+    parsed.port = port;
+  }
 
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const eq = arg.indexOf("=");
-    const flag = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
-    const inlineValue = arg.startsWith("--") && eq !== -1 ? arg.slice(eq + 1) : undefined;
-    // A bare `--out --quiet` must not silently create a file called "--quiet".
-    const takeValue = (): string | undefined => {
-      if (inlineValue !== undefined) return inlineValue;
-      const next = argv[i + 1];
-      if (next === undefined || (next.startsWith("-") && next !== "-")) return undefined;
-      i++;
-      return next;
-    };
-
-    switch (flag) {
-      case "-p":
-      case "--port": {
-        const raw = takeValue();
-        if (raw === undefined) return { error: `${flag} requires a value` };
-        const port = toPort(raw);
-        if (port === null) return { error: `invalid port: ${raw}` };
-        parsed.port = port;
-        break;
-      }
-      case "--host": {
-        const raw = takeValue();
-        if (raw === undefined) return { error: "--host requires a value" };
-        parsed.host = raw;
-        break;
-      }
-      case "-o":
-      case "--out": {
-        const raw = takeValue();
-        if (raw === undefined) return { error: `${flag} requires a value` };
-        parsed.out = raw;
-        break;
-      }
-      case "--append":
-        parsed.append = true;
-        break;
-      case "--no-file":
-        parsed.out = null;
-        break;
-      case "-q":
-      case "--quiet":
-        parsed.quiet = true;
-        break;
-      case "--allow-origin": {
-        const raw = takeValue();
-        if (raw === undefined) return { error: "--allow-origin requires a value" };
-        const normalized = normalizeOrigin(raw);
-        if (normalized === null) {
-          return {
-            error:
-              `invalid origin: ${raw} (expected a scheme and host, such as ` +
-              `https://app.example.com, or the literal "null")`,
-          };
-        }
-        parsed.allowOrigins.push(normalized);
-        break;
-      }
-      case "-h":
-      case "--help":
-        parsed.help = true;
-        break;
-      case "-v":
-      case "--version":
-        parsed.version = true;
-        break;
-      default:
-        return { error: `unknown option: ${arg}` };
+  for (const raw of values["allow-origin"] ?? []) {
+    const normalized = normalizeOrigin(raw);
+    if (normalized === null) {
+      return {
+        error:
+          `invalid origin: ${raw} (expected a scheme and host, such as ` +
+          `https://app.example.com, or the literal "null")`,
+      };
     }
+    parsed.allowOrigins.push(normalized);
   }
 
   return parsed;

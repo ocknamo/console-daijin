@@ -285,17 +285,13 @@ describe("log server", () => {
 
   test("page-supplied control characters cannot forge a log line", async () => {
     const lines = [];
-    const handle = await startLogServer({
-      port: 0,
-      out: null,
-      color: false,
-      write: (line) => lines.push(line),
-    });
-    await fetch(`http://127.0.0.1:${handle.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry({ args: [`${ESC}[2J${ESC}[31mFAKE${ESC}[0m\r00:00:00 error    injected`] })]),
-    });
-    await handle.close();
+    await withServer({ out: null, quiet: false, write: (line) => lines.push(line) }, (_h, post) =>
+      post(
+        batch([
+          entry({ args: [`${ESC}[2J${ESC}[31mFAKE${ESC}[0m\r00:00:00 error    injected`] }),
+        ]),
+      ),
+    );
 
     assert.equal(lines.length, 1);
     assert.doesNotMatch(lines[0], new RegExp(ESC), "an escape sequence reached the terminal");
@@ -310,75 +306,61 @@ describe("log server", () => {
   });
 });
 
+/**
+ * Runs `fn` against a throwaway server and always closes it. The `finally` is
+ * the point: a failing assertion used to leave the server listening, and a
+ * leaked listener is how a later run ends up posting into an earlier run's
+ * output file.
+ */
+async function withServer(options, fn) {
+  const handle = await startLogServer({ port: 0, quiet: true, color: false, ...options });
+  const post = (body) =>
+    fetch(`http://127.0.0.1:${handle.port}${LOGS_PATH}`, { method: "POST", body });
+  try {
+    return await fn(handle, post);
+  } finally {
+    await handle.close();
+  }
+}
+
 describe("file handling", () => {
   test("the output file is truncated on start unless append is set", async () => {
     const dir = mkdtempSync(join(tmpdir(), "console-daijin-"));
-    const outPath = join(dir, "logs.jsonl");
+    const out = join(dir, "logs.jsonl");
+    const read = () => readFileSync(out, "utf8");
 
-    const first = await startLogServer({ port: 0, out: outPath, quiet: true, color: false });
-    await fetch(`http://127.0.0.1:${first.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry({ args: ["from first run"] })]),
-    });
-    await first.close();
-    assert.match(readFileSync(outPath, "utf8"), /from first run/);
+    await withServer({ out }, (_h, post) => post(batch([entry({ args: ["first run"] })])));
+    assert.match(read(), /first run/);
 
-    const second = await startLogServer({ port: 0, out: outPath, quiet: true, color: false });
-    await second.close();
-    assert.equal(readFileSync(outPath, "utf8"), "");
+    // A fresh run starts from an empty file...
+    await withServer({ out }, () => {});
+    assert.equal(read(), "");
 
-    const third = await startLogServer({ port: 0, out: outPath, quiet: true, color: false });
-    await fetch(`http://127.0.0.1:${third.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry({ args: ["kept"] })]),
-    });
-    await third.close();
+    await withServer({ out }, (_h, post) => post(batch([entry({ args: ["kept"] })])));
+    // ...unless append is set, which keeps what the previous run wrote.
+    await withServer({ out, append: true }, (_h, post) =>
+      post(batch([entry({ args: ["added"] })])),
+    );
 
-    // Starting with append keeps what the previous run wrote.
-    const fourth = await startLogServer({
-      port: 0,
-      out: outPath,
-      append: true,
-      quiet: true,
-      color: false,
-    });
-    await fetch(`http://127.0.0.1:${fourth.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry({ args: ["added"] })]),
-    });
-    await fourth.close();
-
-    const contents = readFileSync(outPath, "utf8");
-    assert.match(contents, /kept/);
-    assert.match(contents, /added/);
+    assert.match(read(), /kept/);
+    assert.match(read(), /added/);
 
     rmSync(dir, { recursive: true, force: true });
   });
 
   test("out: null disables file output entirely", async () => {
-    const handle = await startLogServer({ port: 0, out: null, quiet: true, color: false });
-    assert.equal(handle.outPath, null);
-    const res = await fetch(`http://127.0.0.1:${handle.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry()]),
+    await withServer({ out: null }, async (handle, post) => {
+      assert.equal(handle.outPath, null);
+      assert.equal((await post(batch([entry()]))).status, 204);
     });
-    assert.equal(res.status, 204);
-    await handle.close();
   });
 
   test("rendered stdout lines carry the level and the message", async () => {
     const lines = [];
-    const handle = await startLogServer({
-      port: 0,
-      out: null,
-      color: false,
-      write: (line) => lines.push(line),
-    });
-    await fetch(`http://127.0.0.1:${handle.port}${LOGS_PATH}`, {
-      method: "POST",
-      body: batch([entry({ level: "warn", args: ["watch out"] })]),
-    });
-    await handle.close();
+    await withServer(
+      { out: null, quiet: false, write: (line) => lines.push(line) },
+      (_h, post) => post(batch([entry({ level: "warn", args: ["watch out"] })])),
+    );
     assert.equal(lines.length, 1);
     assert.match(lines[0], /warn/);
     assert.match(lines[0], /watch out/);

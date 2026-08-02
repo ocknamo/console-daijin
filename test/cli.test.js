@@ -45,81 +45,80 @@ describe("formatHostForUrl", () => {
   });
 });
 
-describe("parseArgs", () => {
-  test("defaults", () => {
-    const parsed = parseArgs([]);
-    assert.equal(parsed.port, 5959);
-    assert.equal(parsed.host, "127.0.0.1");
-    assert.equal(parsed.out, ".console-daijin/logs.jsonl");
-    assert.equal(parsed.append, false);
-    assert.equal(parsed.quiet, false);
-    assert.deepEqual(parsed.allowOrigins, []);
+describe("parseArgs defaults", () => {
+  test("are the documented ones", () => {
+    assert.deepEqual(parseArgs([]), {
+      port: 5959,
+      host: "127.0.0.1",
+      out: ".console-daijin/logs.jsonl",
+      append: false,
+      quiet: false,
+      allowOrigins: [],
+      help: false,
+      version: false,
+    });
   });
+});
 
-  test("accepts both spaced and inline values", () => {
-    assert.equal(parseArgs(["--port", "1234"]).port, 1234);
-    assert.equal(parseArgs(["--port=1234"]).port, 1234);
-    assert.equal(parseArgs(["-p", "1234"]).port, 1234);
-  });
+// Parsing itself is node:util's job. What is ours is the option table — which
+// options exist, their types, their short forms — so these cases pin that
+// table rather than re-testing the standard library, and one table-driven test
+// covers what used to be six.
+describe("the option table", () => {
+  const cases = [
+    [["--port", "1234"], { port: 1234 }],
+    [["--port=1234"], { port: 1234 }],
+    [["-p", "1234"], { port: 1234 }],
+    [["--host", "0.0.0.0"], { host: "0.0.0.0" }],
+    [["--out", "logs.jsonl"], { out: "logs.jsonl" }],
+    [["-o", "logs.jsonl"], { out: "logs.jsonl" }],
+    [["--out=-leading-dash.jsonl"], { out: "-leading-dash.jsonl" }],
+    [["--no-file"], { out: null }],
+    [["--append"], { append: true }],
+    [["--quiet"], { quiet: true }],
+    [["-q"], { quiet: true }],
+    [["--help"], { help: true }],
+    [["-h"], { help: true }],
+    [["--version"], { version: true }],
+    [["-v"], { version: true }],
+    [
+      ["--allow-origin", "https://a.example", "--allow-origin", "https://b.example"],
+      { allowOrigins: ["https://a.example", "https://b.example"] },
+    ],
+  ];
 
-  test("refuses a value that is really the next flag", () => {
-    // `--out --quiet` used to create a file literally named "--quiet".
-    // The message comes from node:util now, so assert the behaviour and that
-    // the offending option is named, not the exact wording.
-    for (const argv of [["--out", "--quiet"], ["--out"], ["--allow-origin", "-q"]]) {
-      const result = parseArgs(argv);
-      assert.ok("error" in result, `expected ${argv.join(" ")} to be rejected`);
-      assert.match(result.error, /--out|--allow-origin/);
-    }
-  });
+  for (const [argv, expected] of cases) {
+    test(argv.join(" "), () => {
+      const parsed = parseArgs(argv);
+      assert.ok(!("error" in parsed), `unexpected error: ${parsed.error}`);
+      for (const [key, value] of Object.entries(expected)) {
+        assert.deepEqual(parsed[key], value);
+      }
+    });
+  }
+});
 
-  test("rejects stray positional arguments", () => {
-    assert.ok("error" in parseArgs(["logs.jsonl"]));
-  });
-
-  test("rejects invalid ports", () => {
+describe("what parseArgs validates itself", () => {
+  test("rejects a port outside the valid range", () => {
     for (const bad of ["abc", "-1", "70000", "1.5"]) {
       assert.ok("error" in parseArgs(["--port", bad]), `expected ${bad} to be rejected`);
     }
   });
 
-  test("rejects an unknown option instead of ignoring it", () => {
-    const result = parseArgs(["--nope"]);
-    assert.ok("error" in result);
-    assert.match(result.error, /--nope/);
-  });
-
-  test("validates and normalizes --allow-origin", () => {
+  test("normalizes an origin, and refuses one it cannot", () => {
+    // The server compares origins for exact equality, so an un-normalized
+    // value would never match and never say why.
     assert.deepEqual(parseArgs(["--allow-origin", "https://app.example.com/"]).allowOrigins, [
       "https://app.example.com",
     ]);
     assert.ok("error" in parseArgs(["--allow-origin", "app.example.com"]));
   });
 
-  test("--allow-origin is repeatable", () => {
-    const parsed = parseArgs([
-      "--allow-origin",
-      "https://a.example",
-      "--allow-origin",
-      "https://b.example",
-    ]);
-    assert.deepEqual(parsed.allowOrigins, ["https://a.example", "https://b.example"]);
-  });
-
-  test("--no-file disables output and --out sets it", () => {
-    assert.equal(parseArgs(["--no-file"]).out, null);
-    assert.equal(parseArgs(["--out", "logs.jsonl"]).out, "logs.jsonl");
-  });
-
-  test("flags without values", () => {
-    const parsed = parseArgs(["--append", "-q"]);
-    assert.equal(parsed.append, true);
-    assert.equal(parsed.quiet, true);
-    assert.equal(parseArgs(["--help"]).help, true);
-    assert.equal(parseArgs(["-v"]).version, true);
-  });
-
-  test("a path that begins with a dash is still reachable inline", () => {
-    assert.equal(parseArgs(["--out=-weird-name.jsonl"]).out, "-weird-name.jsonl");
+  test("surfaces the parser's own refusals rather than swallowing them", () => {
+    // `--out --quiet` must not create a file named "--quiet"; an unknown
+    // option must not be ignored. node:util decides, we must not discard it.
+    for (const argv of [["--out", "--quiet"], ["--out"], ["--nope"], ["logs.jsonl"]]) {
+      assert.ok("error" in parseArgs(argv), `expected ${argv.join(" ")} to be rejected`);
+    }
   });
 });

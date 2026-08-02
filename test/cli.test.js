@@ -60,19 +60,23 @@ describe("parseArgs defaults", () => {
   });
 });
 
-// Parsing itself is node:util's job. What is ours is the option table — which
-// options exist, their types, their short forms — so these cases pin that
-// table rather than re-testing the standard library, and one table-driven test
-// covers what used to be six.
+// Parsing itself is node:util's job; the option table is ours. Each row pins
+// something that a typo in that table would break — a missing option, a wrong
+// type, a dropped short form, a mapping to the wrong field. Verified by
+// mutation: removing `short: "q"`, dropping `host`, dropping `multiple: true`
+// or inverting the `no-file` mapping each fails at least one row.
+//
+// Cases that only exercise node:util's own parsing are deliberately absent.
+// `--port=1234` and `--out=-leading-dash.jsonl` were here and were removed:
+// with them gone, every one of those mutations is still caught, so they were
+// testing the standard library and nothing else.
 describe("the option table", () => {
   const cases = [
     [["--port", "1234"], { port: 1234 }],
-    [["--port=1234"], { port: 1234 }],
     [["-p", "1234"], { port: 1234 }],
     [["--host", "0.0.0.0"], { host: "0.0.0.0" }],
     [["--out", "logs.jsonl"], { out: "logs.jsonl" }],
     [["-o", "logs.jsonl"], { out: "logs.jsonl" }],
-    [["--out=-leading-dash.jsonl"], { out: "-leading-dash.jsonl" }],
     [["--no-file"], { out: null }],
     [["--append"], { append: true }],
     [["--quiet"], { quiet: true }],

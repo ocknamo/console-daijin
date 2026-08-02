@@ -3,7 +3,7 @@
     "target": "ES2017",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["DOM", "ES2017"],
+    "lib": ["DOM", "DOM.Iterable", "ES2017"],
     "strict": true,
     "declaration": true,
     "declarationMap": true,

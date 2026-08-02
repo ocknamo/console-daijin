@@ -240,8 +240,8 @@ await handle.close()
 - Zero runtime dependencies
 - Framework agnostic — the collector is a plain CLI, not a bundler plugin
 - ESM + CJS dual package
-- ~12KB minified (~5KB gzipped)
-- Inline styles only (no CSS file needed)
+- ~13KB minified (~6KB gzipped)
+- Rendered in a shadow root: the page cannot restyle the panel, and the panel adds no CSS to the page
 
 ---
 

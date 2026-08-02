@@ -18,17 +18,37 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./server": {
+      "import": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      },
+      "require": {
+        "types": "./dist/server.d.cts",
+        "default": "./dist/server.cjs"
+      }
     }
+  },
+  "bin": {
+    "console-daijin-server": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsup",
     "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "npm run build && node --test test/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   },
@@ -38,7 +58,11 @@
     "debug",
     "browser",
     "iframe",
-    "logger"
+    "logger",
+    "cli",
+    "log-server",
+    "devtools",
+    "ai"
   ],
   "volta": {
     "node": "24.14.0"

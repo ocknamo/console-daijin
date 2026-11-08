@@ -4,6 +4,10 @@
   "description": "A browser console viewer that captures console.log/info/warn/error and displays them in a fixed panel. Zero dependencies.",
   "author": "ocknamo",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ocknamo/console-daijin.git"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -66,5 +70,9 @@
   ],
   "volta": {
     "node": "24.22.1"
+  },
+  "allowScripts": {
+    "esbuild": false,
+    "fsevents": false
   }
 }

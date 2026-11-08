@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the floor the CLI build targets, 24 the current LTS.
-        node: ["20", "22", "24"]
+        # npm 12 (required by the install-script policy) needs Node 22.22+.
+        node: ["22", "24"]
     steps:
       - uses: actions/checkout@v7
 
@@ -21,6 +21,8 @@ jobs:
           node-version: ${{ matrix.node }}
           check-latest: true
           cache: npm
+      - name: Use npm 12
+        run: npm install -g npm@12.2.2
 
       - run: npm ci
 
